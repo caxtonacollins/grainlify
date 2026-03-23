@@ -670,6 +670,8 @@ pub enum DataKey {
     AnonymousResolver,
 
     /// Chain identifier (e.g., "stellar", "ethereum") for cross-network protection
+    /// Per-token fee configuration keyed by token contract address.
+    TokenFeeConfig(Address),
     ChainId,
     NetworkId,
 
@@ -729,6 +731,29 @@ pub struct FeeConfig {
     pub lock_fee_rate: i128,
     pub release_fee_rate: i128,
     pub fee_recipient: Address,
+    pub fee_enabled: bool,
+}
+
+/// Per-token fee configuration.
+///
+/// Allows different fee rates and recipients for each accepted token type.
+/// When present, overrides the global `FeeConfig` for that specific token.
+///
+/// # Rounding protection
+/// Fee amounts are always rounded **up** (ceiling division) so that
+/// fractional stroops never reduce the fee to zero.  This prevents a
+/// depositor from splitting a large deposit into many dust transactions
+/// where floor-division would yield fee == 0 on every individual call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenFeeConfig {
+    /// Fee rate on lock, in basis points (1 bp = 0.01 %).
+    pub lock_fee_rate: i128,
+    /// Fee rate on release, in basis points.
+    pub release_fee_rate: i128,
+    /// Address that receives fees collected for this token.
+    pub fee_recipient: Address,
+    /// Whether fee collection is active for this token.
     pub fee_enabled: bool,
 }
 
@@ -945,18 +970,37 @@ impl BountyEscrowContract {
         (Self::get_chain_id(env.clone()), Self::get_network_id(env))
     }
 
-    /// Calculate fee amount based on rate (in basis points)
-    #[allow(dead_code)]
+    /// Calculate fee amount based on rate (in basis points), using **ceiling division**.
+    ///
+    /// Ceiling division ensures that a non-zero fee rate always produces at least
+    /// 1 stroop of fee, regardless of how small the individual amount is.  This
+    /// closes the principal-drain vector where an attacker breaks a large deposit
+    /// into dust amounts that each round down to a zero fee.
+    ///
+    /// Formula: ceil(amount * fee_rate / BASIS_POINTS)
+    ///        = (amount * fee_rate + BASIS_POINTS - 1) / BASIS_POINTS
+    ///
+    /// # Panics
+    /// Returns 0 on arithmetic overflow rather than panicking.
     fn calculate_fee(amount: i128, fee_rate: i128) -> i128 {
-        if fee_rate == 0 {
+        if fee_rate == 0 || amount == 0 {
             return 0;
         }
-        // Fee = (amount * fee_rate) / BASIS_POINTS
-        // Using checked arithmetic to prevent overflow
-        amount
+        // Ceiling integer division: (a + b - 1) / b
+        let numerator = amount
             .checked_mul(fee_rate)
-            .and_then(|x| x.checked_div(BASIS_POINTS))
-            .unwrap_or(0)
+            .and_then(|x| x.checked_add(BASIS_POINTS - 1))
+            .unwrap_or(0);
+        if numerator == 0 {
+            return 0;
+        }
+        numerator / BASIS_POINTS
+    }
+
+    /// Test-only shim exposing `calculate_fee` for unit-level assertions.
+    #[cfg(test)]
+    pub fn calculate_fee_pub(amount: i128, fee_rate: i128) -> i128 {
+        Self::calculate_fee(amount, fee_rate)
     }
 
     /// Get fee configuration (internal helper)
@@ -1639,6 +1683,94 @@ impl BountyEscrowContract {
         Self::get_fee_config_internal(&env)
     }
 
+    /// Set a per-token fee configuration (admin only).
+    ///
+    /// When a `TokenFeeConfig` is set for a given token address it takes
+    /// precedence over the global `FeeConfig` for all escrows denominated
+    /// in that token.
+    ///
+    /// # Arguments
+    /// * `token`            – the token contract address this config applies to
+    /// * `lock_fee_rate`    – fee rate on lock in basis points (0 – 5 000)
+    /// * `release_fee_rate` – fee rate on release in basis points (0 – 5 000)
+    /// * `fee_recipient`    – address that receives fees for this token
+    /// * `fee_enabled`      – whether fee collection is active
+    ///
+    /// # Errors
+    /// * `NotInitialized`  – contract not yet initialised
+    /// * `InvalidFeeRate`  – any rate is outside `[0, MAX_FEE_RATE]`
+    pub fn set_token_fee_config(
+        env: Env,
+        token: Address,
+        lock_fee_rate: i128,
+        release_fee_rate: i128,
+        fee_recipient: Address,
+        fee_enabled: bool,
+    ) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        if !(0..=MAX_FEE_RATE).contains(&lock_fee_rate) {
+            return Err(Error::InvalidFeeRate);
+        }
+        if !(0..=MAX_FEE_RATE).contains(&release_fee_rate) {
+            return Err(Error::InvalidFeeRate);
+        }
+
+        let config = TokenFeeConfig {
+            lock_fee_rate,
+            release_fee_rate,
+            fee_recipient,
+            fee_enabled,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenFeeConfig(token), &config);
+
+        Ok(())
+    }
+
+    /// Get the per-token fee configuration for `token`, if one has been set.
+    ///
+    /// Returns `None` when no token-specific config exists; callers should
+    /// fall back to the global `FeeConfig` in that case.
+    pub fn get_token_fee_config(env: Env, token: Address) -> Option<TokenFeeConfig> {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenFeeConfig(token))
+    }
+
+    /// Internal: resolve the effective fee config for the escrow token.
+    ///
+    /// Precedence: `TokenFeeConfig(token)` > global `FeeConfig`.
+    fn resolve_fee_config(env: &Env) -> (i128, i128, Address, bool) {
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        if let Some(tok_cfg) = env
+            .storage()
+            .instance()
+            .get::<DataKey, TokenFeeConfig>(&DataKey::TokenFeeConfig(token_addr))
+        {
+            (
+                tok_cfg.lock_fee_rate,
+                tok_cfg.release_fee_rate,
+                tok_cfg.fee_recipient,
+                tok_cfg.fee_enabled,
+            )
+        } else {
+            let global = Self::get_fee_config_internal(env);
+            (
+                global.lock_fee_rate,
+                global.release_fee_rate,
+                global.fee_recipient,
+                global.fee_enabled,
+            )
+        }
+    }
+
     /// Update multisig configuration (admin only)
     pub fn update_multisig_config(
         env: Env,
@@ -1822,17 +1954,54 @@ impl BountyEscrowContract {
         let client = token::Client::new(&env, &token_addr);
         soroban_sdk::log!(&env, "token client ok");
 
-        // Transfer funds from depositor to contract
+        // Transfer full gross amount from depositor to contract first.
         client.transfer(&depositor, &env.current_contract_address(), &amount);
         soroban_sdk::log!(&env, "transfer ok");
 
+        // Resolve effective fee config (per-token takes precedence over global).
+        let (lock_fee_rate, _release_fee_rate, fee_recipient, fee_enabled) =
+            Self::resolve_fee_config(&env);
+
+        // Deduct lock fee from the escrowed principal.
+        // Ceiling division ensures fee >= 1 stroop whenever rate > 0,
+        // preventing principal drain via dust-amount splitting.
+        let fee_amount = if fee_enabled && lock_fee_rate > 0 {
+            Self::calculate_fee(amount, lock_fee_rate)
+        } else {
+            0
+        };
+
+        // Net amount stored in escrow after fee.
+        // Fee must never exceed the deposit; guard against misconfiguration.
+        let net_amount = amount.checked_sub(fee_amount).unwrap_or(amount);
+        if net_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        // Transfer fee to recipient immediately (separate transfer so it is
+        // visible as a distinct on-chain operation).
+        if fee_amount > 0 {
+            client.transfer(&env.current_contract_address(), &fee_recipient, &fee_amount);
+            events::emit_fee_collected(
+                &env,
+                events::FeeCollected {
+                    operation_type: events::FeeOperationType::Lock,
+                    amount: fee_amount,
+                    fee_rate: lock_fee_rate,
+                    recipient: fee_recipient,
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
+        }
+        soroban_sdk::log!(&env, "fee ok");
+
         let escrow = Escrow {
             depositor: depositor.clone(),
-            amount,
+            amount: net_amount,
             status: EscrowStatus::Locked,
             deadline,
             refund_history: vec![&env],
-            remaining_amount: amount,
+            remaining_amount: net_amount,
         };
         invariants::assert_escrow(&env, &escrow);
 
@@ -2031,12 +2200,45 @@ impl BountyEscrowContract {
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
 
-        // Transfer funds to contributor
-        client.transfer(
-            &env.current_contract_address(),
-            &contributor,
-            &escrow.amount,
-        );
+        // Resolve effective fee config for release.
+        let (_lock_fee_rate, release_fee_rate, fee_recipient, fee_enabled) =
+            Self::resolve_fee_config(&env);
+
+        let release_fee = if fee_enabled && release_fee_rate > 0 {
+            Self::calculate_fee(escrow.amount, release_fee_rate)
+        } else {
+            0
+        };
+
+        // Net payout to contributor after release fee.
+        let net_payout = escrow
+            .amount
+            .checked_sub(release_fee)
+            .unwrap_or(escrow.amount);
+        if net_payout <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        if release_fee > 0 {
+            client.transfer(
+                &env.current_contract_address(),
+                &fee_recipient,
+                &release_fee,
+            );
+            events::emit_fee_collected(
+                &env,
+                events::FeeCollected {
+                    operation_type: events::FeeOperationType::Release,
+                    amount: release_fee,
+                    fee_rate: release_fee_rate,
+                    recipient: fee_recipient,
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
+        }
+
+        // Transfer net amount to contributor
+        client.transfer(&env.current_contract_address(), &contributor, &net_payout);
 
         escrow.status = EscrowStatus::Released;
         escrow.remaining_amount = 0;
