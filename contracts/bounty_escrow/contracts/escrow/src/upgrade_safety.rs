@@ -484,34 +484,37 @@ pub fn validate_upgrade(env: &Env) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::{BountyEscrowContract, BountyEscrowContractClient};
-    use soroban_sdk::testutils::Ledger;
     use soroban_sdk::{testutils::Address as _, Address, Env};
 
-    fn create_test_env() -> (Env, BountyEscrowContractClient<'static>) {
+    fn create_test_env<'a>() -> (Env, BountyEscrowContractClient<'a>, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, BountyEscrowContract);
         let client = BountyEscrowContractClient::new(&env, &contract_id);
-        (env, client)
+        let addr = contract_id.clone();
+        (env, client, addr)
     }
 
     #[test]
     fn test_safety_checks_enabled_by_default() {
         let env = Env::default();
-        assert!(is_safety_checks_enabled(&env));
+        let contract_id = env.register_contract(None, BountyEscrowContract);
+        let enabled = env.as_contract(&contract_id, || is_safety_checks_enabled(&env));
+        assert!(enabled);
     }
 
     #[test]
     fn test_can_disable_safety_checks() {
         let env = Env::default();
-        set_safety_checks_enabled(&env, false);
-        assert!(!is_safety_checks_enabled(&env));
+        let contract_id = env.register_contract(None, BountyEscrowContract);
+        env.as_contract(&contract_id, || set_safety_checks_enabled(&env, false));
+        assert!(!env.as_contract(&contract_id, || is_safety_checks_enabled(&env)));
     }
 
     #[test]
     fn test_simulate_upgrade_after_init() {
-        let (env, client) = create_test_env();
-        
+        let (env, client, contract_id) = create_test_env();
+
         let admin = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
@@ -519,8 +522,7 @@ mod tests {
 
         client.init(&admin, &token);
 
-        let report = simulate_upgrade(&env);
-        // Should pass all checks after proper initialization
+        let report = env.as_contract(&contract_id, || simulate_upgrade(&env));
         assert!(report.is_safe);
     }
 
@@ -528,21 +530,21 @@ mod tests {
     fn test_simulate_upgrade_before_init_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        env.register_contract(None, BountyEscrowContract);
+        let contract_id = env.register_contract(None, BountyEscrowContract);
 
-        let report = simulate_upgrade(&env);
-        // Should fail - contract not initialized
+        let report = env.as_contract(&contract_id, || simulate_upgrade(&env));
         assert!(!report.is_safe);
     }
 
     #[test]
     fn test_record_safety_check() {
         let env = Env::default();
-        
-        assert!(get_last_safety_check(&env).is_none());
-        
-        record_safety_check(&env);
-        
-        assert!(get_last_safety_check(&env).is_some());
+        let contract_id = env.register_contract(None, BountyEscrowContract);
+
+        assert!(env.as_contract(&contract_id, || get_last_safety_check(&env)).is_none());
+
+        env.as_contract(&contract_id, || record_safety_check(&env));
+
+        assert!(env.as_contract(&contract_id, || get_last_safety_check(&env)).is_some());
     }
 }

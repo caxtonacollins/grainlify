@@ -146,7 +146,7 @@ fn test_upgrade_partial_release_then_complete() {
 /// `simulate_upgrade` passes on a properly initialised contract.
 #[test]
 fn test_safety_check_passes_after_init() {
-    let (env, client, _contract_id) = create_test_env();
+    let (env, client, contract_id) = create_test_env();
 
     let admin = Address::generate(&env);
     let token_admin = Address::generate(&env);
@@ -154,7 +154,7 @@ fn test_safety_check_passes_after_init() {
 
     client.init(&admin, &token);
 
-    let report = upgrade_safety::simulate_upgrade(&env);
+    let report = env.as_contract(&contract_id, || upgrade_safety::simulate_upgrade(&env));
     assert!(report.is_safe, "Safety check should pass after initialization");
     assert_eq!(report.checks_passed, 10);
     assert_eq!(report.checks_failed, 0);
@@ -163,10 +163,10 @@ fn test_safety_check_passes_after_init() {
 /// `simulate_upgrade` fails before the contract is initialised.
 #[test]
 fn test_safety_check_fails_before_init() {
-    let (env, _client, _contract_id) = create_test_env();
+    let (env, _client, contract_id) = create_test_env();
     // Intentionally skip client.init(…)
 
-    let report = upgrade_safety::simulate_upgrade(&env);
+    let report = env.as_contract(&contract_id, || upgrade_safety::simulate_upgrade(&env));
     assert!(
         !report.is_safe,
         "Safety check should fail before initialization"
@@ -177,7 +177,7 @@ fn test_safety_check_fails_before_init() {
 /// `simulate_upgrade` passes when locked escrows are present.
 #[test]
 fn test_safety_check_with_locked_escrows() {
-    let (env, client, _contract_id) = create_test_env();
+    let (env, client, contract_id) = create_test_env();
 
     let admin = Address::generate(&env);
     let depositor = Address::generate(&env);
@@ -190,14 +190,14 @@ fn test_safety_check_with_locked_escrows() {
     let deadline = env.ledger().timestamp() + 1_000;
     client.lock_funds(&depositor, &1, &5_000, &deadline);
 
-    let report = upgrade_safety::simulate_upgrade(&env);
+    let report = env.as_contract(&contract_id, || upgrade_safety::simulate_upgrade(&env));
     assert!(report.is_safe, "Safety check should pass with locked escrows");
 }
 
 /// `validate_upgrade` returns `Ok` for an initialised contract.
 #[test]
 fn test_upgrade_succeeds_with_valid_state() {
-    let (env, client, _contract_id) = create_test_env();
+    let (env, client, contract_id) = create_test_env();
 
     let admin = Address::generate(&env);
     let token_admin = Address::generate(&env);
@@ -205,17 +205,17 @@ fn test_upgrade_succeeds_with_valid_state() {
 
     client.init(&admin, &token);
 
-    let result = upgrade_safety::validate_upgrade(&env);
+    let result = env.as_contract(&contract_id, || upgrade_safety::validate_upgrade(&env));
     assert!(result.is_ok(), "validate_upgrade should succeed with valid state");
 }
 
 /// `validate_upgrade` returns `Err` for an uninitialised contract.
 #[test]
 fn test_upgrade_fails_without_init() {
-    let (env, _client, _contract_id) = create_test_env();
+    let (env, _client, contract_id) = create_test_env();
     // Intentionally skip client.init(…)
 
-    let result = upgrade_safety::validate_upgrade(&env);
+    let result = env.as_contract(&contract_id, || upgrade_safety::validate_upgrade(&env));
     assert!(
         result.is_err(),
         "validate_upgrade should fail without initialization"
@@ -225,28 +225,31 @@ fn test_upgrade_fails_without_init() {
 /// Safety checks are enabled by default.
 #[test]
 fn test_get_safety_status() {
-    let (env, _client, _contract_id) = create_test_env();
+    let (env, _client, contract_id) = create_test_env();
 
-    assert!(
-        upgrade_safety::is_safety_checks_enabled(&env),
-        "Safety checks should be enabled by default"
-    );
+    let enabled =
+        env.as_contract(&contract_id, || upgrade_safety::is_safety_checks_enabled(&env));
+    assert!(enabled, "Safety checks should be enabled by default");
 }
 
 /// Safety checks can be toggled off and back on.
 #[test]
 fn test_set_safety_status() {
-    let (env, _client, _contract_id) = create_test_env();
+    let (env, _client, contract_id) = create_test_env();
 
-    upgrade_safety::set_safety_checks_enabled(&env, false);
+    env.as_contract(&contract_id, || {
+        upgrade_safety::set_safety_checks_enabled(&env, false)
+    });
     assert!(
-        !upgrade_safety::is_safety_checks_enabled(&env),
+        !env.as_contract(&contract_id, || upgrade_safety::is_safety_checks_enabled(&env)),
         "Safety checks should be disabled"
     );
 
-    upgrade_safety::set_safety_checks_enabled(&env, true);
+    env.as_contract(&contract_id, || {
+        upgrade_safety::set_safety_checks_enabled(&env, true)
+    });
     assert!(
-        upgrade_safety::is_safety_checks_enabled(&env),
+        env.as_contract(&contract_id, || upgrade_safety::is_safety_checks_enabled(&env)),
         "Safety checks should be re-enabled"
     );
 }
@@ -254,7 +257,7 @@ fn test_set_safety_status() {
 /// `simulate_upgrade` passes with a released escrow.
 #[test]
 fn test_safety_check_with_released_escrow() {
-    let (env, client, _contract_id) = create_test_env();
+    let (env, client, contract_id) = create_test_env();
 
     let admin = Address::generate(&env);
     let depositor = Address::generate(&env);
@@ -269,7 +272,7 @@ fn test_safety_check_with_released_escrow() {
     client.lock_funds(&depositor, &1, &5_000, &deadline);
     client.release_funds(&1, &contributor);
 
-    let report = upgrade_safety::simulate_upgrade(&env);
+    let report = env.as_contract(&contract_id, || upgrade_safety::simulate_upgrade(&env));
     assert!(
         report.is_safe,
         "Safety check should pass with released escrow"
@@ -279,7 +282,7 @@ fn test_safety_check_with_released_escrow() {
 /// `simulate_upgrade` passes with a refunded escrow.
 #[test]
 fn test_safety_check_with_refunded_escrow() {
-    let (env, client, _contract_id) = create_test_env();
+    let (env, client, contract_id) = create_test_env();
 
     let admin = Address::generate(&env);
     let depositor = Address::generate(&env);
@@ -296,7 +299,7 @@ fn test_safety_check_with_refunded_escrow() {
 
     client.refund(&1);
 
-    let report = upgrade_safety::simulate_upgrade(&env);
+    let report = env.as_contract(&contract_id, || upgrade_safety::simulate_upgrade(&env));
     assert!(
         report.is_safe,
         "Safety check should pass with refunded escrow"
@@ -306,7 +309,7 @@ fn test_safety_check_with_refunded_escrow() {
 /// `simulate_upgrade` passes when multiple escrows are in different states.
 #[test]
 fn test_safety_check_with_multiple_escrows() {
-    let (env, client, _contract_id) = create_test_env();
+    let (env, client, contract_id) = create_test_env();
 
     let admin = Address::generate(&env);
     let depositor = Address::generate(&env);
@@ -332,7 +335,7 @@ fn test_safety_check_with_multiple_escrows() {
     env.ledger().set_timestamp(env.ledger().timestamp() + 200);
     client.refund(&3);
 
-    let report = upgrade_safety::simulate_upgrade(&env);
+    let report = env.as_contract(&contract_id, || upgrade_safety::simulate_upgrade(&env));
     assert!(
         report.is_safe,
         "Safety check should pass with multiple escrows in different states"
@@ -344,12 +347,14 @@ fn test_safety_check_with_multiple_escrows() {
 /// otherwise-uninitialized contract — the gate is bypassed intentionally.
 #[test]
 fn test_upgrade_with_disabled_safety_allows_invalid_state() {
-    let (env, _client, _contract_id) = create_test_env();
+    let (env, _client, contract_id) = create_test_env();
 
-    upgrade_safety::set_safety_checks_enabled(&env, false);
+    env.as_contract(&contract_id, || {
+        upgrade_safety::set_safety_checks_enabled(&env, false)
+    });
 
     // With checks disabled, validate_upgrade short-circuits to Ok
-    let result = upgrade_safety::validate_upgrade(&env);
+    let result = env.as_contract(&contract_id, || upgrade_safety::validate_upgrade(&env));
     assert!(
         result.is_ok(),
         "validate_upgrade should succeed when safety checks are disabled"
@@ -361,13 +366,17 @@ fn test_upgrade_with_disabled_safety_allows_invalid_state() {
 fn test_safety_module_check_count() {
     let env = Env::default();
     env.mock_all_auths();
-    env.register_contract(None, BountyEscrowContract);
+    let contract_id = env.register_contract(None, BountyEscrowContract);
 
-    assert!(upgrade_safety::is_safety_checks_enabled(&env));
+    assert!(env.as_contract(&contract_id, || upgrade_safety::is_safety_checks_enabled(&env)));
 
-    upgrade_safety::set_safety_checks_enabled(&env, false);
-    assert!(!upgrade_safety::is_safety_checks_enabled(&env));
+    env.as_contract(&contract_id, || {
+        upgrade_safety::set_safety_checks_enabled(&env, false)
+    });
+    assert!(!env.as_contract(&contract_id, || upgrade_safety::is_safety_checks_enabled(&env)));
 
-    upgrade_safety::set_safety_checks_enabled(&env, true);
-    assert!(upgrade_safety::is_safety_checks_enabled(&env));
+    env.as_contract(&contract_id, || {
+        upgrade_safety::set_safety_checks_enabled(&env, true)
+    });
+    assert!(env.as_contract(&contract_id, || upgrade_safety::is_safety_checks_enabled(&env)));
 }
