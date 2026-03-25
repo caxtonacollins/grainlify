@@ -669,6 +669,8 @@ mod anti_abuse {
 
 mod claim_period;
 pub use claim_period::{ClaimRecord, ClaimStatus};
+mod payout_splits;
+pub use payout_splits::{BeneficiarySplit, SplitConfig};
 #[cfg(test)]
 mod test_claim_period_expiry_cancellation;
 
@@ -1522,14 +1524,23 @@ impl ProgramEscrowContract {
     // Payout Functions
     // ========================================================================
 
-    /// Execute batch payouts to multiple recipients
+    /// Execute batch payouts to multiple winners.
+    ///
+    /// This function distributes prizes to multiple recipients in a single atomic transaction.
+    /// It enforces "all-or-nothing" semantics: if any individual transfer fails, the entire
+    /// batch operation reverts, ensuring accounting consistency.
     ///
     /// # Arguments
-    /// * `recipients` - Vector of recipient addresses
-    /// * `amounts` - Vector of amounts (must match recipients length)
+    /// * `recipients` - Vector of winner addresses.
+    /// * `amounts` - Vector of prize amounts (must match recipients length).
     ///
     /// # Returns
-    /// Updated ProgramData after payouts
+    /// The updated `ProgramData` reflecting the new balance and payout history.
+    ///
+    /// # Security
+    /// - Requires authorization from the `authorized_payout_key`.
+    /// - Protected by reentrancy guard.
+    /// - Respects circuit breaker and threshold limits.
     pub fn batch_payout(env: Env, recipients: Vec<Address>, amounts: Vec<i128>) -> ProgramData {
         // Validation precedence (deterministic ordering):
         // 1. Reentrancy guard
@@ -1626,6 +1637,11 @@ impl ProgramEscrowContract {
             threshold_monitor::record_operation_success(&env);
             threshold_monitor::record_outflow(&env, amount);
 
+            // Record success for circuit breaker and threshold monitor
+            error_recovery::record_success(&env);
+            threshold_monitor::record_operation_success(&env);
+            threshold_monitor::record_outflow(&env, amount);
+
             // Record payout
             let payout_record = PayoutRecord {
                 recipient,
@@ -1661,14 +1677,19 @@ impl ProgramEscrowContract {
         updated_data
     }
 
-    /// Execute a single payout to one recipient
+    /// Execute a single payout to one winner.
     ///
     /// # Arguments
-    /// * `recipient` - Address of the recipient
-    /// * `amount` - Amount to transfer
+    /// * `recipient` - Address of the winner.
+    /// * `amount` - Amount to transfer.
     ///
     /// # Returns
-    /// Updated ProgramData after payout
+    /// The updated `ProgramData`.
+    ///
+    /// # Security
+    /// - Requires authorization from the `authorized_payout_key`.
+    /// - Protected by reentrancy guard.
+    /// - Respects circuit breaker and threshold limits.
     pub fn single_payout(env: Env, recipient: Address, amount: i128) -> ProgramData {
         // Validation precedence (deterministic ordering):
         // 1. Reentrancy guard
@@ -1730,8 +1751,6 @@ impl ProgramEscrowContract {
         }
 
         // Transfer funds from contract to recipient
-        let contract_address = env.current_contract_address();
-        let token_client = token::Client::new(&env, &program_data.token_address);
         token_client.transfer(&contract_address, &recipient, &amount);
 
         // Record success for circuit breaker and threshold monitor
@@ -2010,6 +2029,40 @@ impl ProgramEscrowContract {
         amounts: Vec<i128>,
     ) -> ProgramData {
         Self::batch_payout(env, recipients, amounts)
+    }
+
+    // --- Payout Splits (Ratio-based) ---
+
+    pub fn set_split_config(
+        env: Env,
+        program_id: String,
+        beneficiaries: Vec<BeneficiarySplit>,
+    ) -> SplitConfig {
+        payout_splits::set_split_config(&env, &program_id, beneficiaries)
+    }
+
+    pub fn get_split_config(env: Env, program_id: String) -> Option<SplitConfig> {
+        payout_splits::get_split_config(&env, &program_id)
+    }
+
+    pub fn disable_split_config(env: Env, program_id: String) {
+        payout_splits::disable_split_config(&env, &program_id);
+    }
+
+    pub fn execute_split_payout(
+        env: Env,
+        program_id: String,
+        total_amount: i128,
+    ) -> payout_splits::SplitPayoutResult {
+        payout_splits::execute_split_payout(&env, &program_id, total_amount)
+    }
+
+    pub fn preview_split(
+        env: Env,
+        program_id: String,
+        total_amount: i128,
+    ) -> Vec<BeneficiarySplit> {
+        payout_splits::preview_split(&env, &program_id, total_amount)
     }
 
     /// Query payout history by recipient with pagination
