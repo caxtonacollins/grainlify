@@ -460,6 +460,7 @@ pub enum DataKey {
     ReleaseHistory(String),          // program_id -> Vec<ProgramReleaseHistory>
     NextScheduleId(String),          // program_id -> next schedule_id
     MultisigConfig(String),          // program_id -> MultisigConfig
+    SplitConfig(String),             // program_id -> SplitConfig
     PayoutApproval(String, Address), // program_id, recipient -> PayoutApproval
     PendingClaim(String, u64),       // (program_id, schedule_id) -> ClaimRecord
     ClaimWindow,                     // u64 seconds (global config)
@@ -1072,11 +1073,7 @@ impl ProgramEscrowContract {
             panic!("Amount must be greater than zero");
         }
 
-        let mut program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap();
+        let mut program_data: ProgramData = env.storage().instance().get(&PROGRAM_DATA).unwrap();
 
         // Update balances
         program_data.total_funds += amount;
@@ -1455,7 +1452,7 @@ impl ProgramEscrowContract {
         if caller != admin {
             panic!("Unauthorized: only circuit admin can configure");
         }
-        
+
         let config = error_recovery::CircuitBreakerConfig {
             failure_threshold,
             success_threshold,
@@ -1486,7 +1483,13 @@ impl ProgramEscrowContract {
         // Emit audit event for rate limit config update
         env.events().publish(
             (symbol_short!("rate_lim"), symbol_short!("update")),
-            (window_size, max_operations, cooldown_period, admin, env.ledger().timestamp()),
+            (
+                window_size,
+                max_operations,
+                cooldown_period,
+                admin,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -1555,14 +1558,14 @@ impl ProgramEscrowContract {
         reentrancy_guard::set_entered(&env);
 
         // 2. Contract must be initialized
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| {
-                reentrancy_guard::clear_entered(&env);
-                panic!("Program not initialized")
-            });
+        let program_data: ProgramData =
+            env.storage()
+                .instance()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Program not initialized")
+                });
 
         // 3. Operational state: paused
         if Self::check_paused(&env, symbol_short!("release")) {
@@ -1631,7 +1634,7 @@ impl ProgramEscrowContract {
 
             // Transfer funds from contract to recipient
             token_client.transfer(&contract_address, &recipient, &amount);
-            
+
             // Record success for circuit breaker and threshold monitor
             error_recovery::record_success(&env);
             threshold_monitor::record_operation_success(&env);
@@ -1704,14 +1707,14 @@ impl ProgramEscrowContract {
         reentrancy_guard::set_entered(&env);
 
         // 2. Contract must be initialized
-        let program_data: ProgramData = env
-            .storage()
-            .instance()
-            .get(&PROGRAM_DATA)
-            .unwrap_or_else(|| {
-                reentrancy_guard::clear_entered(&env);
-                panic!("Program not initialized")
-            });
+        let program_data: ProgramData =
+            env.storage()
+                .instance()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| {
+                    reentrancy_guard::clear_entered(&env);
+                    panic!("Program not initialized")
+                });
 
         // 3. Operational state: paused
         if Self::check_paused(&env, symbol_short!("release")) {
@@ -1751,6 +1754,8 @@ impl ProgramEscrowContract {
         }
 
         // Transfer funds from contract to recipient
+        let contract_address = env.current_contract_address();
+        let token_client = token::Client::new(&env, &program_data.token_address);
         token_client.transfer(&contract_address, &recipient, &amount);
 
         // Record success for circuit breaker and threshold monitor
@@ -1860,7 +1865,7 @@ impl ProgramEscrowContract {
 
         let schedule = ProgramReleaseSchedule {
             schedule_id,
-            recipient,
+            recipient: recipient.clone(),
             amount,
             release_timestamp,
             released: false,
@@ -2638,9 +2643,7 @@ impl ProgramEscrowContract {
             resolution_notes: None,
         };
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Dispute, &record);
+        env.storage().instance().set(&DataKey::Dispute, &record);
 
         env.events().publish(
             (DISPUTE_OPENED,),
@@ -2693,9 +2696,7 @@ impl ProgramEscrowContract {
         record.resolved_at = Some(now);
         record.resolution_notes = Some(resolution_notes.clone());
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Dispute, &record);
+        env.storage().instance().set(&DataKey::Dispute, &record);
 
         env.events().publish(
             (DISPUTE_RESOLVED,),
