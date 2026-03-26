@@ -771,7 +771,7 @@ impl GrainlifyContract {
 
         // Initialize multisig configuration
         MultiSig::init(&env, signers, threshold);
-        
+
         // Set initial version to mark contract as initialized
         env.storage().instance().set(&DataKey::Version, &VERSION);
 
