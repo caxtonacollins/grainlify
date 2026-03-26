@@ -1272,7 +1272,7 @@ impl GrainlifyContract {
         if !monitoring::verify_invariants(&env) {
             monitoring::track_operation(
                 &env, 
-                symbol_short!("execute_upgrade"), 
+                Symbol::new(&env, "execute_upgrade"), 
                 env.current_contract_address(), 
                 false
             );
@@ -1283,7 +1283,7 @@ impl GrainlifyContract {
         if !MultiSig::can_execute(&env, proposal_id) {
             monitoring::track_operation(
                 &env, 
-                symbol_short!("execute_upgrade"), 
+                Symbol::new(&env, "execute_upgrade"), 
                 env.current_contract_address(), 
                 false
             );
@@ -1307,7 +1307,7 @@ impl GrainlifyContract {
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("wasm")),
             UpgradeEvent {
-                new_wasm_hash: proposal.wasm_hash,
+                new_wasm_hash: proposal.wasm_hash.clone(),
                 version: current_version,
                 timestamp: env.ledger().timestamp(),
             },
@@ -1319,19 +1319,19 @@ impl GrainlifyContract {
         // Track successful operation
         monitoring::track_operation(
             &env, 
-            symbol_short!("execute_upgrade"), 
+            Symbol::new(&env, "execute_upgrade"), 
             env.current_contract_address(), 
             true
         );
 
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
-        monitoring::emit_performance(&env, symbol_short!("execute_upgrade"), duration);
+        monitoring::emit_performance(&env, Symbol::new(&env, "execute_upgrade"), duration);
 
         // Emit upgrade execution event
         env.events().publish(
-            (symbol_short!("upgrade_executed"),),
-            (proposal_id, wasm_hash, current_version),
+            (Symbol::new(&env, "upgrade_executed"),),
+            (proposal_id, proposal.wasm_hash, current_version),
         );
     }
 
